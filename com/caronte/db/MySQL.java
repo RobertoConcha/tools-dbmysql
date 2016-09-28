@@ -26,6 +26,7 @@ import com.caronte.jpath.JPATH;
 import com.caronte.json.JSONObject;
 import com.caronte.json.JSONValue;
 import com.caronte.json.JSONValueType;
+import com.mysql.jdbc.exceptions.jdbc4.CommunicationsException;
 
 public class MySQL 
 {
@@ -126,12 +127,20 @@ public class MySQL
 	@SuppressWarnings("unchecked")
 	private String createDynamicFilter(JSONValue filters) throws Exception
 	{
+		return createDynamicFilter(filters, null);
+	}
+
+	@SuppressWarnings("unchecked")
+	private String createDynamicFilter(JSONValue filters, JSONValue typeFilter) throws Exception
+	{
 		StringBuffer dynamicFilter = new StringBuffer();
+		Boolean isOr = typeFilter!=null && typeFilter.getValue().toString().equals("OR");
 
 		if (filters != null && filters.getType() == JSONValueType.ARRAY)
 		{
 			ArrayList<Object> array = (ArrayList<Object>)filters.getValue();
-			
+			int aux = 0;
+
 			for (Object object : array) 
 			{
 				JSONValue field = JPATH.find((JSONObject)object, "/field");
@@ -144,7 +153,21 @@ public class MySQL
 					String init = "";
 					String end = "";
 
-					dynamicFilter.append(" AND ");
+					if( aux == 0 )
+					{
+						dynamicFilter.append(" AND ");
+						if ( isOr ) dynamicFilter.append(" ( ");
+						aux++;
+					}
+					else if ( isOr )
+					{
+						dynamicFilter.append(" OR ");
+					}
+					else
+					{
+						dynamicFilter.append(" AND ");
+					}
+
 					dynamicFilter.append((String)field.getValue());
 					dynamicFilter.append(" ");
 					dynamicFilter.append((String)operator.getValue());
@@ -202,6 +225,8 @@ public class MySQL
 					dynamicFilter.append(end);					
 				}
 			}
+
+			if ( isOr ) dynamicFilter.append(" ) ");
 		}
 		
 		return dynamicFilter.toString();
@@ -213,6 +238,7 @@ public class MySQL
 		JSONValue filters = JPATH.find(jsonObject, "/filters");
 		JSONValue fieldOrder = JPATH.find(jsonObject, "/fieldOrder");
 		JSONValue typeOrder = JPATH.find(jsonObject, "/typeOrder");
+		JSONValue typeFilter = JPATH.find(jsonObject, "/typeFilter");
 		JSONValue currentPage = JPATH.find(jsonObject, "/currentPage");
 		JSONValue pageSize = JPATH.find(jsonObject, "/pageSize");
 		JSONValue maxPageScrollElements = JPATH.find(jsonObject, "/maxPageScrollElements");
@@ -222,20 +248,21 @@ public class MySQL
 		evalute("maxPageScrollElements", maxPageScrollElements, JSONValueType.INTEGER);
 		evalute("fieldOrder", fieldOrder, JSONValueType.INTEGER);
 		evalute("typeOrder", typeOrder, JSONValueType.STRING);
-					
-		String dynamicFilter = createDynamicFilter(filters);
-		
-		String countQuery = "SELECT count(1) AS dataSize FROM (" + query + ") AS T WHERE 1 " + dynamicFilter;
-		String pagedQuery = query + dynamicFilter + " ORDER BY " + (Integer)fieldOrder.getValue() +  " " + (String)typeOrder.getValue() + " LIMIT " + (((Integer)currentPage.getValue() - 1) * ((Integer)pageSize.getValue())) + "," + ((Integer)pageSize.getValue());
-		
+		evalute("typeFilter", typeOrder, JSONValueType.STRING);
+
+		String dynamicFilter = createDynamicFilter(filters, typeFilter);
+
+		String countQuery = "SELECT count(1) AS dataSize FROM (" + query + dynamicFilter + ") AS T";
+		String pagedQuery = query + dynamicFilter + " ORDER BY " + Integer.parseInt(fieldOrder.getValue().toString()) +  " " + (String)typeOrder.getValue() + " LIMIT " + (( Integer.parseInt(currentPage.getValue().toString()) - 1) * (Integer.parseInt(pageSize.getValue().toString()))) + "," + (Integer.parseInt(pageSize.getValue().toString()));
+
 		JSONObject resultCount = executeQuery(countQuery, jsonObject);
 		JSONObject resultPaged = executeQuery(pagedQuery, jsonObject);
 		
 		JSONValue dataSize = JPATH.find(resultCount, "/data[0]/dataSize");
 		
 		evalute("dataSize", dataSize, JSONValueType.INTEGER);
-		
-		ArrayList<Integer> pageScroller = PageScroller.create((Integer)maxPageScrollElements.getValue(), (Integer)dataSize.getValue(), (Integer)pageSize.getValue(), (Integer)currentPage.getValue());
+
+		ArrayList<Integer> pageScroller = PageScroller.create(Integer.parseInt(maxPageScrollElements.getValue().toString()), Integer.parseInt(dataSize.getValue().toString()), Integer.parseInt(pageSize.getValue().toString()), Integer.parseInt(currentPage.getValue().toString()));
 		
 		result.addPair("currentPage", currentPage.getValue());
 		result.addPair("pageSize", pageSize.getValue());
@@ -265,13 +292,33 @@ public class MySQL
 
 		connection = null;
 		resultSet = null;
-		resultSetMetaData = null;
 		preparedStatement = null;
 		
 		try
 		{
 			connection = openConnection();
-			
+
+			try
+			{
+				preparedStatement = connection.prepareStatement("SELECT 1 FROM DUAL");
+				preparedStatement.executeQuery();
+			}
+			catch ( CommunicationsException ce )
+			{
+				for( int i=0; i<maxPoolSize+1; i++ )
+				{
+					try
+					{
+						connection = openConnection();
+						preparedStatement = connection.prepareStatement("SELECT 1 FROM DUAL");
+						preparedStatement.executeQuery();
+					}
+					catch (Exception e)
+					{
+					}
+				}
+			}
+
 			preparedStatement = connection.prepareStatement(query);
 
 			if (jsonObject != null)
@@ -308,6 +355,7 @@ public class MySQL
 								preparedStatement.setBigDecimal(i + 1, new BigDecimal(value));
 							break;
 							case "date":
+							case "datetime":
 								Date date = new Date(simpleDateFormat.parse(value).getTime());
 								preparedStatement.setDate(i + 1, date);
 							break;
@@ -350,6 +398,9 @@ public class MySQL
 					case Types.LONGVARBINARY:
 						column.addPair("size", resultSetMetaData.getPrecision(i + 1));
 						column.addPair("type", "LONGVARBINARY");
+						break;
+					case Types.TIMESTAMP:
+						column.addPair("type", "TIMESTAMP");
 						break;
 					case Types.DATE:
 						column.addPair("type", "DATE");
@@ -403,8 +454,19 @@ public class MySQL
 						case Types.LONGVARBINARY:							
 							element.addPair(resultSetMetaData.getColumnLabel(i + 1), new String (Base64.getEncoder().encode(resultSet.getBytes(i + 1)),"UTF-8"));
 							break;
+						case Types.TIMESTAMP:
+							try {
+								element.addPair(resultSetMetaData.getColumnLabel(i + 1), simpleDateFormat.format(resultSet.getTimestamp(i + 1)));
+							} catch (NullPointerException e) {
+								element.addPair(resultSetMetaData.getColumnLabel(i + 1), resultSet.getString(i + 1)==null ? "" : resultSet.getString(i + 1));
+							}
+							break;
 						case Types.DATE:
-							element.addPair(resultSetMetaData.getColumnLabel(i + 1), simpleDateFormat.format(resultSet.getDate(i + 1)));
+							try {
+								element.addPair(resultSetMetaData.getColumnLabel(i + 1), simpleDateFormat.format(resultSet.getDate(i + 1)));
+							} catch (NullPointerException e) {
+								element.addPair(resultSetMetaData.getColumnLabel(i + 1), resultSet.getString(i + 1)==null ? "" : resultSet.getString(i + 1));
+							}
 							break;
 						case Types.DECIMAL:
 							element.addPair(resultSetMetaData.getColumnLabel(i + 1), resultSet.getBigDecimal(i + 1));
@@ -499,6 +561,7 @@ public class MySQL
 					outParameter = callableStatement.getString(spParameter.getParameterPosition());
 					break;
 				case "datetime":
+				case "date":
 					outParameter = callableStatement.getDate(spParameter.getParameterPosition());
 					break;
 				case "tinytext":
@@ -619,6 +682,7 @@ public class MySQL
 			}
 			break;
 		case "datetime":
+		case "date":
 			if (spParameter.getValue() == null)
 			{
 				callableStatement.setNull(spParameter.getParameterPosition(), Types.DATE);
@@ -682,8 +746,9 @@ public class MySQL
 		case "varchar":
 			callableStatement.registerOutParameter(spParameter.getParameterPosition(), Types.VARCHAR);						
 			break;
+		case "date":
 		case "datetime":
-			callableStatement.registerOutParameter(spParameter.getParameterPosition(), Types.DATE);						
+			callableStatement.registerOutParameter(spParameter.getParameterPosition(), Types.DATE);
 			break;
 		case "tinytext":
 		case "text":
@@ -721,11 +786,31 @@ public class MySQL
 		try
 		{
 			connection = openConnection();
-			
-			preparedStatement = connection.prepareStatement("SELECT ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM information_schema.parameters WHERE SPECIFIC_SCHEMA = ? AND SPECIFIC_NAME = ? ORDER BY ORDINAL_POSITION;");
-			preparedStatement.setString(1, schema);
-			preparedStatement.setString(2, procedure);
-			resultSet = preparedStatement.executeQuery();
+
+			try
+			{
+				preparedStatement = connection.prepareStatement("SELECT ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM information_schema.parameters WHERE SPECIFIC_SCHEMA = ? AND SPECIFIC_NAME = ? ORDER BY ORDINAL_POSITION;");
+				preparedStatement.setString(1, schema);
+				preparedStatement.setString(2, procedure);
+				resultSet = preparedStatement.executeQuery();
+			}
+			catch ( CommunicationsException ce )
+			{
+				for( int i=0; i<maxPoolSize+1; i++ )
+				{
+					try
+					{
+						connection = openConnection();
+						preparedStatement = connection.prepareStatement("SELECT ORDINAL_POSITION, PARAMETER_MODE, PARAMETER_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM information_schema.parameters WHERE SPECIFIC_SCHEMA = ? AND SPECIFIC_NAME = ? ORDER BY ORDINAL_POSITION;");
+						preparedStatement.setString(1, schema);
+						preparedStatement.setString(2, procedure);
+						resultSet = preparedStatement.executeQuery();
+					}
+					catch (Exception e)
+					{
+					}
+				}
+			}
 						
 			if (resultSet.next())
 			{
