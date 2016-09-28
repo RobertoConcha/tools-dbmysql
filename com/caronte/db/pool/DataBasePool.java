@@ -107,7 +107,7 @@ public class DataBasePool
 				try
 				{
 					DataBaseConnection dataBaseConnectionAux = new DataBaseConnection();	
-					dataBaseConnectionAux.setConnection(DriverManager.getConnection("jdbc:mysql://" + ip + ":" + port + "/" + schema, user, password));
+					dataBaseConnectionAux.setConnection(DriverManager.getConnection("jdbc:mysql://" + ip + ":" + port + "/" + schema + "?autoReconnect=true", user, password));
 					dataBaseConnectionAux.setStatus(Status.AVAILABLE);
 					
 					if (dataBaseConnection == null)
@@ -129,7 +129,7 @@ public class DataBasePool
 		{
 			if (dataBaseConnection != null && dataBaseConnection.getConnection() != null && dataBaseConnection.getConnection().isClosed())
 			{
-				dataBaseConnection.setConnection(DriverManager.getConnection("jdbc:mysql://" + ip + ":" + port + "/" + schema, user, password));
+				dataBaseConnection.setConnection(DriverManager.getConnection("jdbc:mysql://" + ip + ":" + port + "/" + schema + "?autoReconnect=true", user, password));
 			}
 
 			pivot = (pivot + delta + 1) % stackConnections.size();
